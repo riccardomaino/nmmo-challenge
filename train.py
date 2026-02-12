@@ -15,12 +15,17 @@ from reinforcement_learning import environment
 from train_helper import generate_replay, init_wandb, sweep, train
 import syllabus_wrapper
 
+# Fix the "Weights only load failed" error globally, setting torch.load to always use weights_only=False
+_original_torch_load = torch.load
+def _trusted_load(*args, **kwargs):
+    kwargs["weights_only"] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = _trusted_load
+
 # Suppress Gym deprecation warnings from the environment
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Add PufferLib classes to the safe list for PyTorch 2.6+
-torch.serialization.add_safe_globals([pufferlib.frameworks.cleanrl.RecurrentPolicy])
-torch.serialization.add_safe_globals([pufferlib.frameworks.cleanrl.Policy])
 
 DEBUG = False
 # See curriculum_generation/manual_curriculum.py for details
