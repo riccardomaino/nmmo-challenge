@@ -1,7 +1,7 @@
 wandb:
-  project: nmmo-baselines
-  entity: kywch
-  group: ~
+  project: nmmo-challenge
+  entity: riccardo-maino
+  group: initial-tests
 
 debug:
   train:
