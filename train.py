@@ -4,13 +4,23 @@ import inspect
 import logging
 import sys
 import time
+import warnings
 
+import torch
 import pufferlib
+import pufferlib.frameworks.cleanrl
 import yaml
 
 from reinforcement_learning import environment
 from train_helper import generate_replay, init_wandb, sweep, train
 import syllabus_wrapper
+
+# Suppress Gym deprecation warnings from the environment
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Add PufferLib classes to the safe list for PyTorch 2.6+
+torch.serialization.add_safe_globals([pufferlib.frameworks.cleanrl.RecurrentPolicy])
+torch.serialization.add_safe_globals([pufferlib.frameworks.cleanrl.Policy])
 
 DEBUG = False
 # See curriculum_generation/manual_curriculum.py for details
