@@ -2,9 +2,10 @@
 requires = ["pip>=23.0", "setuptools>=61.0", "wheel"]
 
 [project]
-name = "nmmo2-baselines"
+name = "nmmo2-challenge"
 version = "0.1.0"
-description = "Neural MMO 2023 competition baselines"
+requires-python = ">=3.10,<3.11"
+description = "Neural MMO 2023 Competition"
 keywords = []
 classifiers = [
 	"Natural Language :: English",
