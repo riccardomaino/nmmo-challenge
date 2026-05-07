@@ -394,6 +394,166 @@ def evaluate(data):
 
     return data.stats, infos
 
+def _train_ppo(data, config, b_obs, b_actions, b_logprobs, b_values, b_advantages, b_returns,
+               num_minibatches):
+    pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls = [], [], [], [], [], []
+    mb_obs_buffer = torch.zeros_like(b_obs[0], pin_memory=(data.device == "cuda"))
+ 
+    for epoch in range(config.update_epochs):
+        lstm_state = None
+        for mb in range(num_minibatches):
+            mb_obs_buffer.copy_(b_obs[mb], non_blocking=True)
+            mb_obs = mb_obs_buffer.to(data.device, non_blocking=True)
+            mb_actions = b_actions[mb].contiguous()
+            mb_values = b_values[mb].reshape(-1)
+            mb_advantages = b_advantages[mb].reshape(-1)
+            mb_returns = b_returns[mb].reshape(-1)
+ 
+            if hasattr(data.agent, "lstm"):
+                _, newlogprob, entropy, newvalue, lstm_state = data.agent(
+                    mb_obs, state=lstm_state, action=mb_actions
+                )
+                lstm_state = (lstm_state[0].detach(), lstm_state[1].detach())
+            else:
+                _, newlogprob, entropy, newvalue = data.agent(
+                    mb_obs.reshape(-1, *data.pool.single_observation_space.shape),
+                    action=mb_actions,
+                )
+ 
+            logratio = newlogprob - b_logprobs[mb].reshape(-1)
+            ratio = logratio.exp()
+ 
+            with torch.no_grad():
+                old_approx_kl = (-logratio).mean()
+                old_kls.append(old_approx_kl.item())
+                approx_kl = ((ratio - 1) - logratio).mean()
+                kls.append(approx_kl.item())
+                clipfracs += [((ratio - 1.0).abs() > config.clip_coef).float().mean().item()]
+ 
+            mb_advantages = mb_advantages.reshape(-1)
+            if config.norm_adv:
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                    mb_advantages.std() + 1e-8
+                )
+ 
+            # Policy loss (clipped surrogate)
+            pg_loss1 = -mb_advantages * ratio
+            pg_loss2 = -mb_advantages * torch.clamp(
+                ratio, 1 - config.clip_coef, 1 + config.clip_coef
+            )
+            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+            pg_losses.append(pg_loss.item())
+ 
+            # Value loss
+            newvalue = newvalue.view(-1)
+            if config.clip_vloss:
+                v_loss_unclipped = (newvalue - mb_returns) ** 2
+                v_clipped = mb_values + torch.clamp(
+                    newvalue - mb_values,
+                    -config.vf_clip_coef,
+                    config.vf_clip_coef
+                )
+                v_loss_clipped = (v_clipped - mb_returns) ** 2
+                v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
+                v_loss = 0.5 * v_loss_max.mean()
+            else:
+                v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
+            v_losses.append(v_loss.item())
+ 
+            entropy_loss = entropy.mean()
+            entropy_losses.append(entropy_loss.item())
+ 
+            loss = pg_loss - config.ent_coef * entropy_loss + v_loss * config.vf_coef
+            data.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(data.agent.parameters(), config.max_grad_norm)
+            data.optimizer.step()
+ 
+        if config.target_kl is not None and approx_kl > config.target_kl:
+            break
+ 
+    return pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls
+ 
+def _train_grpo(data, config, b_obs, b_actions, b_logprobs, b_values, b_advantages, b_returns,
+                num_minibatches):
+    """GRPO (Group Relative Policy Optimization) update.
+ 
+    Advantages are already computed by the GAE step in train(); GRPO then
+    re-normalises them *per group* (one minibatch = one group) and applies a
+    clipped surrogate objective identical to PPO but without the value-function
+    loss term (GRPO uses the group-mean baseline instead of a learned critic).
+ 
+    GRPO-specific config keys (all optional, fall back to PPO equivalents):
+      grpo_group_size  – number of samples per group (default: batch_rows)
+      grpo_beta        – KL penalty coefficient (0 = pure clip, default: 0)
+    """
+    pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls = [], [], [], [], [], []
+    mb_obs_buffer = torch.zeros_like(b_obs[0], pin_memory=(data.device == "cuda"))
+    beta = getattr(config, "grpo_beta", 0.0)
+ 
+    for epoch in range(config.update_epochs):
+        lstm_state = None
+        for mb in range(num_minibatches):
+            mb_obs_buffer.copy_(b_obs[mb], non_blocking=True)
+            mb_obs = mb_obs_buffer.to(data.device, non_blocking=True)
+            mb_actions = b_actions[mb].contiguous()
+            mb_advantages = b_advantages[mb].reshape(-1)
+ 
+            if hasattr(data.agent, "lstm"):
+                _, newlogprob, entropy, newvalue, lstm_state = data.agent(
+                    mb_obs, state=lstm_state, action=mb_actions
+                )
+                lstm_state = (lstm_state[0].detach(), lstm_state[1].detach())
+            else:
+                _, newlogprob, entropy, newvalue = data.agent(
+                    mb_obs.reshape(-1, *data.pool.single_observation_space.shape),
+                    action=mb_actions,
+                )
+ 
+            logratio = newlogprob - b_logprobs[mb].reshape(-1)
+            ratio = logratio.exp()
+ 
+            with torch.no_grad():
+                old_approx_kl = (-logratio).mean()
+                old_kls.append(old_approx_kl.item())
+                approx_kl = ((ratio - 1) - logratio).mean()
+                kls.append(approx_kl.item())
+                clipfracs += [((ratio - 1.0).abs() > config.clip_coef).float().mean().item()]
+ 
+            # GRPO: normalise advantages within this group (minibatch)
+            mb_advantages = mb_advantages.reshape(-1)
+            mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                mb_advantages.std() + 1e-8
+            )
+ 
+            # Clipped surrogate (same form as PPO)
+            pg_loss1 = -mb_advantages * ratio
+            pg_loss2 = -mb_advantages * torch.clamp(
+                ratio, 1 - config.clip_coef, 1 + config.clip_coef
+            )
+            pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+            pg_losses.append(pg_loss.item())
+ 
+            # Optional KL penalty (beta > 0 recovers the KL-regularised GRPO variant)
+            kl_penalty = beta * approx_kl if beta > 0 else 0.0
+ 
+            # GRPO does not use a learned value function loss
+            v_loss = torch.tensor(0.0, device=data.device)
+            v_losses.append(v_loss.item())
+ 
+            entropy_loss = entropy.mean()
+            entropy_losses.append(entropy_loss.item())
+ 
+            loss = pg_loss - config.ent_coef * entropy_loss + kl_penalty
+            data.optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(data.agent.parameters(), config.max_grad_norm)
+            data.optimizer.step()
+ 
+        if config.target_kl is not None and approx_kl > config.target_kl:
+            break
+ 
+    return pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls
 
 @pufferlib.utils.profile
 def train(data):
@@ -446,6 +606,25 @@ def train(data):
     ).transpose(0, 1)
     b_returns = b_advantages + b_values
 
+    
+    # Dispatch to the appropriate training strategy
+    train_time = time.time()
+    strategy = getattr(config, "strategy", "ppo").lower()
+    if strategy == "ppo":
+        pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls = _train_ppo(
+            data, config, b_obs, b_actions, b_logprobs, b_values, b_advantages, b_returns,
+            num_minibatches,
+        )
+    elif strategy == "grpo":
+        pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls = _train_grpo(
+            data, config, b_obs, b_actions, b_logprobs, b_values, b_advantages, b_returns,
+            num_minibatches,
+        )
+    else:
+        raise ValueError(f"Unknown training strategy: '{strategy}'. Choose 'ppo' or 'grpo'.")
+
+    
+    
     # Optimizing the policy and value network
     train_time = time.time()
     pg_losses, entropy_losses, v_losses, clipfracs, old_kls, kls = [], [], [], [], [], []

@@ -180,6 +180,9 @@ if __name__ == "__main__":
         "-a", "--agent", type=str, default="neurips23_start_kit", help="Agent module to use"
     )
     parser.add_argument(
+        "-s", "--strategy", type=str, default="ppo", help="RL algorithm to use"
+    )
+    parser.add_argument(
         "-n", "--exp-name", type=str, default=None, help="Need exp name to resume the experiment"
     )
     parser.add_argument(
@@ -228,6 +231,12 @@ if __name__ == "__main__":
 
     # Perform mode-specific updates
     args = update_args(args, mode=args["mode"])
+
+    # Set the strategy
+    if args.get("strategy") is not None:
+        args.train.strategy = args["strategy"]
+    elif not hasattr(args.train, "strategy"):
+        args.train.strategy = "ppo"  
 
     # Make default or syllabus-based env_creator
     syllabus = None

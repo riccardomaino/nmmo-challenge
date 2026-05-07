@@ -19,6 +19,8 @@ train:
   torch_deterministic: True
   device: cuda
   total_timesteps: 10_000_000
+  strategy: ppo
+  # PPO hyperparameters
   learning_rate: 1.5e-4
   anneal_lr: True
   gamma: 0.99
@@ -31,7 +33,9 @@ train:
   vf_coef: 0.5
   max_grad_norm: 0.5
   target_kl: ~
-
+  # GRPO hyperparameters
+  grpo_beta: 0.5
+  # Training configuration
   num_envs: 15
   envs_per_worker: 1
   envs_per_batch: 6
@@ -148,6 +152,26 @@ hybrid:
     update_epochs: 1
   recurrent:
     num_layers: 1
+  reward_wrapper:
+    hp_bonus_weight: 0.03
+    exp_bonus_weight: 0.002
+    defense_bonus_weight: 0.04
+    attack_bonus_weight: 0.0
+    gold_bonus_weight: 0.001
+    custom_bonus_scale: 0.1
+    disable_give: True
+    donot_attack_dangerous_npc: True
+
+maino:
+  env:
+    maps_path: 'maps/train_maino/'
+    num_maps: 1024
+    resilient_population: 0
+  train:
+    update_epochs: 2
+    learning_rate: 1.0e-4
+  recurrent:
+    num_layers: 2
   reward_wrapper:
     hp_bonus_weight: 0.03
     exp_bonus_weight: 0.002
